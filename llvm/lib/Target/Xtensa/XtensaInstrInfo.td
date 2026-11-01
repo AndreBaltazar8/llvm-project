@@ -80,6 +80,11 @@ def NEG : RRR_Inst<0x00, 0x00, 0x06, (outs AR:$r), (ins AR:$t),
 //===----------------------------------------------------------------------===//
 // Move instructions
 //===----------------------------------------------------------------------===//
+// MOVI and constant-pool L32R are cheap to repeat: let the register
+// allocator rematerialize them instead of spilling the value to the stack
+// (upstream leaves both non-rematerializable, so large functions spill and
+// reload every hoisted constant and address).
+let isReMaterializable = 1, isAsCheapAsAMove = 1, isMoveImm = 1 in
 def MOVI : RRI8_Inst<0x02, (outs AR:$t), (ins imm12m:$imm),
                     "movi\t$t, $imm",
                     [(set AR:$t, imm12m:$imm)]> {
@@ -260,6 +265,7 @@ def S16I : Store_II8<0x05, "s16i", truncstorei16, addr_ish2, mem16>;
 def S32I : Store_II8<0x06, "s32i", store, addr_ish4, mem32>;
 
 let AddedComplexity = 10 in
+let isReMaterializable = 1 in
 def L32R : RI16_Inst<0x01, (outs AR:$t), (ins L32Rtarget:$label),
                     "l32r\t$t, $label", [(set AR:$t, (load (Xtensa_pcrel_wrapper tconstpool:$label)))]> {
   bits<16> label;
