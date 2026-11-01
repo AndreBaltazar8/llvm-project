@@ -422,6 +422,7 @@ def BNONE : RRI8_Inst<0x07, (outs),
   let imm8 = target;
 }
 
+let isBranch = 1, isTerminator = 1 in
 def BBCI : RRI8_Inst<0x07, (outs),
                     (ins AR:$s, uimm5:$imm, brtarget:$target),
                     "bbci\t$s, $imm, $target", []> {
@@ -434,6 +435,7 @@ def BBCI : RRI8_Inst<0x07, (outs),
   let imm8 = target;
 }
 
+let isBranch = 1, isTerminator = 1 in
 def BBSI : RRI8_Inst<0x07, (outs),
                     (ins AR:$s, uimm5:$imm, brtarget:$target),
                     "bbsi\t$s, $imm, $target", []> {
@@ -447,6 +449,25 @@ def BBSI : RRI8_Inst<0x07, (outs),
 }
 
 def : Pat<(brcond AR:$s, bb:$target), (BNEZ AR:$s, bb:$target)>;
+
+// Single-bit tests: GCC branches on a bit with BBCI/BBSI, upstream loads the
+// mask (a literal from bit 11 up), ANDs and branches on zero. The mask
+// constant stays a plain immediate for these users (LowerImmediate).
+def BitMask : ImmLeaf<i32, [{ return isPowerOf2_32((uint32_t)Imm); }]>;
+def BitMaskIndex : SDNodeXForm<imm, [{
+  return CurDAG->getTargetConstant(llvm::countr_zero((uint32_t)N->getZExtValue()),
+                                   SDLoc(N), MVT::i32);
+}]>;
+def : Pat<(brcc SETEQ, (and AR:$s, BitMask:$m), (i32 0), bb:$target),
+          (BBCI AR:$s, (BitMaskIndex $m), bb:$target)>;
+def : Pat<(brcc SETNE, (and AR:$s, BitMask:$m), (i32 0), bb:$target),
+          (BBSI AR:$s, (BitMaskIndex $m), bb:$target)>;
+def : Pat<(brcond (and AR:$s, BitMask:$m), bb:$target),
+          (BBSI AR:$s, (BitMaskIndex $m), bb:$target)>;
+def : Pat<(brcc SETEQ, (and (srl AR:$s, uimm5:$b), (i32 1)), (i32 0), bb:$target),
+          (BBCI AR:$s, uimm5:$b, bb:$target)>;
+def : Pat<(brcc SETNE, (and (srl AR:$s, uimm5:$b), (i32 1)), (i32 0), bb:$target),
+          (BBSI AR:$s, uimm5:$b, bb:$target)>;
 //===----------------------------------------------------------------------===//
 // Call and jump instructions
 //===----------------------------------------------------------------------===//

@@ -997,6 +997,39 @@ SDValue XtensaTargetLowering::LowerRETURNADDR(SDValue Op,
   return DAG.getCopyFromReg(DAG.getEntryNode(), SDLoc(Op), RA, VT);
 }
 
+// True when every user of the constant N is an AND that selects to EXTUI
+// (a low mask of at most 16 bits) or, for a single bit, an AND whose only
+// users branch on it being zero or non-zero (BBCI/BBSI).
+static bool isImmediateAbsorbedByUsers(SDNode &N, uint32_t Value) {
+  bool Extui = Value != 0 && Value <= 0xffff && isMask_32(Value);
+  bool Bit = isPowerOf2_32(Value);
+  if (!Extui && !Bit)
+    return false;
+  if (N.use_empty())
+    return false;
+  for (SDNode *User : N.users()) {
+    if (User->getOpcode() != ISD::AND || User->getOperand(1).getNode() != &N)
+      return false;
+    if (Extui)
+      continue;
+    if (User->use_empty())
+      return false;
+    for (SDNode *Branch : User->users()) {
+      if (Branch->getOpcode() == ISD::BRCOND &&
+          Branch->getOperand(1).getNode() == User)
+        continue;
+      if (Branch->getOpcode() != ISD::BR_CC ||
+          Branch->getOperand(2).getNode() != User ||
+          !isNullConstant(Branch->getOperand(3)))
+        return false;
+      ISD::CondCode CC = cast<CondCodeSDNode>(Branch->getOperand(1))->get();
+      if (CC != ISD::SETEQ && CC != ISD::SETNE)
+        return false;
+    }
+  }
+  return true;
+}
+
 SDValue XtensaTargetLowering::LowerImmediate(SDValue Op,
                                              SelectionDAG &DAG) const {
   const ConstantSDNode *CN = cast<ConstantSDNode>(Op);
@@ -1011,6 +1044,10 @@ SDValue XtensaTargetLowering::LowerImmediate(SDValue Op,
     SDNode &OpNode = *Op.getNode();
     if ((OpNode.hasOneUse() && OpNode.user_begin()->getOpcode() == ISD::ADD) &&
         isShiftedInt<8, 8>(Value))
+      return Op;
+    // Keep masks that EXTUI or a bit-test branch absorbs (see the BitMask
+    // and ExtuiMask patterns) rather than loading them from a literal.
+    if (isImmediateAbsorbedByUsers(OpNode, (uint32_t)Value))
       return Op;
     Type *Ty = Type::getInt32Ty(*DAG.getContext());
     Constant *CV = ConstantInt::getSigned(Ty, Value);

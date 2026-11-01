@@ -271,6 +271,12 @@ bool XtensaInstrInfo::reverseBranchCondition(
   case Xtensa::BLTUI:
     Cond[0].setImm(Xtensa::BGEUI);
     return false;
+  case Xtensa::BBCI:
+    Cond[0].setImm(Xtensa::BBSI);
+    return false;
+  case Xtensa::BBSI:
+    Cond[0].setImm(Xtensa::BBCI);
+    return false;
   case Xtensa::BEQZ:
     Cond[0].setImm(Xtensa::BNEZ);
     return false;
@@ -316,6 +322,8 @@ XtensaInstrInfo::getBranchDestBlock(const MachineInstr &MI) const {
   case Xtensa::BLTUI:
   case Xtensa::BGEI:
   case Xtensa::BGEUI:
+  case Xtensa::BBCI:
+  case Xtensa::BBSI:
     return MI.getOperand(2).getMBB();
   case Xtensa::BEQZ:
   case Xtensa::BNEZ:
@@ -352,6 +360,8 @@ bool XtensaInstrInfo::isBranchOffsetInRange(unsigned BranchOp,
   case Xtensa::BLTUI:
   case Xtensa::BGEI:
   case Xtensa::BGEUI:
+  case Xtensa::BBCI:
+  case Xtensa::BBSI:
     BrOffset -= 4;
     return isIntN(8, BrOffset);
   case Xtensa::BEQZ:
@@ -605,6 +615,8 @@ unsigned XtensaInstrInfo::insertConstBranchAtInst(
   case Xtensa::BLTUI:
   case Xtensa::BGEI:
   case Xtensa::BGEUI:
+  case Xtensa::BBCI:
+  case Xtensa::BBSI:
     MI = BuildMI(MBB, I, DL, get(BR_C))
              .addImm(offset)
              .addReg(Cond[1].getReg())
@@ -669,6 +681,8 @@ unsigned XtensaInstrInfo::insertBranchAtInst(MachineBasicBlock &MBB,
   case Xtensa::BLTUI:
   case Xtensa::BGEI:
   case Xtensa::BGEUI:
+  case Xtensa::BBCI:
+  case Xtensa::BBSI:
     MI = BuildMI(MBB, I, DL, get(BR_C))
              .addReg(Cond[1].getReg())
              .addImm(Cond[2].getImm())
@@ -720,6 +734,8 @@ bool XtensaInstrInfo::isBranch(const MachineBasicBlock::iterator &MI,
   case Xtensa::BLTUI:
   case Xtensa::BGEI:
   case Xtensa::BGEUI:
+  case Xtensa::BBCI:
+  case Xtensa::BBSI:
     Cond[0].setImm(OpCode);
     Target = &MI->getOperand(2);
     return true;
