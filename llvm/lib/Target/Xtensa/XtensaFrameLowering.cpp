@@ -368,7 +368,11 @@ void XtensaFrameLowering::processFunctionBeforeFrameFinalized(
   auto *XtensaFI = MF.getInfo<XtensaMachineFunctionInfo>();
   unsigned ScavSlotsNum = 0;
 
-  if (!isInt<12>(MaxSPOffset))
+  // A frame index operand beyond what a load or store encodes (L8UI/S8I
+  // reach 255 bytes, L16 510, L32I/S32I 1020) is materialized through a
+  // scratch register, which the scavenger may have to spill: give it a slot
+  // past the smallest reach, not only past 12 bits.
+  if (!isUInt<8>(MaxSPOffset))
     ScavSlotsNum = 1;
 
   // Far branches over 18-bit offset require a spill slot for scratch register.
