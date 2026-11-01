@@ -14,6 +14,7 @@
 #define LLVM_LIB_TARGET_XTENSA_XTENSAASMPRINTER_H
 
 #include "XtensaTargetMachine.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/CodeGen/AsmPrinter.h"
 #include "llvm/CodeGen/MachineConstantPool.h"
 #include "llvm/Support/Compiler.h"
@@ -27,6 +28,10 @@ class raw_ostream;
 
 class LLVM_LIBRARY_VISIBILITY XtensaAsmPrinter : public AsmPrinter {
   const MCSubtargetInfo *STI;
+  // BEQZ/BNEZ whose target is provably within BEQZ.N/BNEZ.N range.
+  SmallPtrSet<const MachineInstr *, 32> NarrowBranches;
+
+  void selectNarrowBranches(const MachineFunction &MF);
 
 public:
   static char ID;
@@ -38,6 +43,8 @@ public:
 
   StringRef getPassName() const override { return "Xtensa Assembly Printer"; }
   void emitInstruction(const MachineInstr *MI) override;
+
+  bool runOnMachineFunction(MachineFunction &MF) override;
 
   void emitConstantPool() override;
 
