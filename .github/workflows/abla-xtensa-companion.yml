@@ -1,0 +1,224 @@
+name: Optional Abla Xtensa LLVM companion (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      revision:
+        description: Companion revision (new positive integer; never overwrite a release)
+        type: string
+        required: true
+        default: '1'
+      publish:
+        description: Publish after all three builds and relocation checks pass
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: abla-xtensa-companion
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  HOMEBREW_NO_AUTO_UPDATE: '1'
+
+jobs:
+  plan:
+    if: github.repository == 'AndreBaltazar8/llvm-project'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      tag: ${{ steps.plan.outputs.tag }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+          sparse-checkout: abla-tools/xtensa-companion
+      - name: Check version, package safety and immutable release name
+        id: plan
+        env:
+          REVISION: ${{ inputs.revision }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 abla-tools/xtensa-companion/unit_tests.py
+          tag=$(python3 abla-tools/xtensa-companion/build.py tag "$REVISION")
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          # The listing must succeed; a network/auth error is not a missing tag.
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 1000 --json tagName > releases.json
+          TAG="$tag" python3 - <<'PY'
+          import json, os
+          tags = [release['tagName'] for release in json.load(open('releases.json'))]
+          if os.environ['TAG'] in tags:
+              raise SystemExit('Companion version already exists; choose a new revision')
+          PY
+
+  build:
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: x86_64-linux
+          - runner: macos-15
+            platform: arm64-macos
+          - runner: macos-15-intel
+            platform: x86_64-macos
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+          sparse-checkout: abla-tools/xtensa-companion
+      - name: Build Linux on the old-glibc baseline
+        if: runner.os == 'Linux'
+        env:
+          REVISION: ${{ inputs.revision }}
+        run: |
+          docker run --rm -v "$PWD:/repo" -w /repo \
+            -e GITHUB_ACTIONS=true -e GITHUB_SHA -e GITHUB_RUN_ID -e GITHUB_REPOSITORY \
+            -e REVISION -e CC=gcc-12 -e CXX=g++-12 \
+            ubuntu:22.04@sha256:3b06811b2afd352be909dd088a004166d665dc76d38b13eada33522a9d915c6f \
+            bash -ceu '
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update
+              apt-get install -y --no-install-recommends \
+                gcc-12 g++-12 cmake ninja-build python3 ca-certificates zlib1g-dev binutils patchelf
+              getconf GNU_LIBC_VERSION
+              python3 abla-tools/xtensa-companion/build.py build "$REVISION" dist
+            ' > linux-build.log 2>&1 || { tail -150 linux-build.log; exit 1; }
+      - name: Build each Mac natively with the Apple compiler
+        if: runner.os == 'macOS'
+        env:
+          REVISION: ${{ inputs.revision }}
+        run: |
+          for tool in cmake ninja; do
+            if ! command -v "$tool" >/dev/null; then brew install "$tool"; fi
+          done
+          CC=$(xcrun --find clang)
+          CXX=$(xcrun --find clang++)
+          export CC CXX
+          xcodebuild -version
+          python3 abla-tools/xtensa-companion/build.py build "$REVISION" dist \
+            > macos-build.log 2>&1 || { tail -150 macos-build.log; exit 1; }
+      - name: Retain the cohort and all relocation evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: companion-${{ matrix.platform }}
+          path: dist/
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Retain source build logs even when packaging fails
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: xtensa-build-logs-${{ matrix.platform }}
+          path: '*-build.log'
+          retention-days: 14
+          if-no-files-found: warn
+
+  clean-linux:
+    needs: [plan, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+          sparse-checkout: abla-tools/xtensa-companion
+      - uses: actions/download-artifact@95815c38cf2ff2164869cbab79da8d1f422bc89e # v4
+        with:
+          name: companion-x86_64-linux
+          path: dist
+      - name: Run the relocated archive without the build GCC installation
+        run: |
+          docker run --rm -v "$PWD:/repo" -w /repo \
+            ubuntu:22.04@sha256:3b06811b2afd352be909dd088a004166d665dc76d38b13eada33522a9d915c6f \
+            bash -ceu '
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update
+              apt-get install -y --no-install-recommends python3
+              test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.35"
+              # A parent LLVM environment must not displace the private cohort.
+              export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu
+              python3 abla-tools/xtensa-companion/build.py verify dist/*.tar.gz dist/clean-container
+            '
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: companion-clean-container
+          path: dist/clean-container
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    needs: [plan, build, clean-linux]
+    if: inputs.publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@95815c38cf2ff2164869cbab79da8d1f422bc89e # v4
+        with:
+          pattern: companion-*
+          path: artifacts
+      - name: Verify all platforms and build the release index
+        env:
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          artifacts, out = Path('artifacts'), Path('release')
+          out.mkdir()
+          manifests = sorted(artifacts.glob('companion-*/*.manifest.json'))
+          expected = {'x86_64-linux', 'arm64-macos', 'x86_64-macos'}
+          found, index = set(), []
+          for path in manifests:
+              value = json.loads(path.read_text())
+              host = value['platform']
+              assert host in expected and host not in found, host
+              assert value['version'] == os.environ['TAG']
+              found.add(host)
+              archive = path.parent / (value['version'] + '-' + host + '.tar.gz')
+              sha = hashlib.sha256(archive.read_bytes()).hexdigest()
+              sidecar = archive.with_suffix('.gz.sha256')
+              assert sidecar.read_text().split() == [sha, archive.name]
+              (out / archive.name).write_bytes(archive.read_bytes())
+              (out / sidecar.name).write_bytes(sidecar.read_bytes())
+              index.append({'platform': host, 'archive': archive.name, 'sha256': sha,
+                            'bytes': archive.stat().st_size, 'manifest': value})
+          assert found == expected, found
+          assert len({p['manifest']['sourceCommit'] for p in index}) == 1
+          assert len({p['manifest']['sourceArchiveSha256'] for p in index}) == 1
+          (out / 'manifest.json').write_text(json.dumps(index, indent=2) + '\n')
+          checksums = ''.join((out / (p['archive'] + '.sha256')).read_text() for p in index)
+          checksums += hashlib.sha256((out / 'manifest.json').read_bytes()).hexdigest() + '  manifest.json\n'
+          (out / 'SHA256SUMS').write_text(checksums)
+          Path('source-commit.txt').write_text(index[0]['manifest']['sourceCommit'])
+          Path('notes.md').write_text(
+              'Optional private Xtensa opt/llc/libLLVM cohort. No Clang or firmware linker.\n\n'
+              'Linux: built and tested on glibc 2.35. macOS: native arm64 and Intel; '
+              'deployment target 13.0 configured, execution tested on macOS 15. '
+              'See the included manifests, checksums and licenses.\n')
+          PY
+      - name: Publish without replacing existing assets or the fork's latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --target "$(cat source-commit.txt)" --title "$TAG" --draft \
+            --notes-file notes.md release/*
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest=false
