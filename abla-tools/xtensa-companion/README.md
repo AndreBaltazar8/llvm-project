@@ -44,3 +44,9 @@ Local maintenance checks (no LLVM compilation):
 python3 abla-tools/xtensa-companion/unit_tests.py
 python3 -m py_compile abla-tools/xtensa-companion/build.py
 ```
+
+For a checker-only repair, `verify_run=<completed source run ID>` rechecks the
+retained archives on fresh runners without rebuilding LLVM. It requires
+`publish=false`, verifies the original builder identity, and cannot publish.
+This is especially useful when a diagnostic parser, rather than a helper,
+failed. The original failed run remains part of the evidence.

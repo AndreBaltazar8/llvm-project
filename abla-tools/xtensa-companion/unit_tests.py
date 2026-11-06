@@ -5,10 +5,17 @@ from pathlib import Path
 import tarfile
 import tempfile
 import unittest
+from unittest import mock
 import build
 
 
 class Packaging(unittest.TestCase):
+    def test_ldd_paths_with_spaces(self):
+        path = "/tmp/relocated Xtensa companion abc/lib/libLLVM.so.23.1"
+        text = "\tlibLLVM.so.23.1 => " + path + " (0x00007f0123456000)\n"
+        with mock.patch.object(build, "capture", return_value=text):
+            self.assertEqual(build.linux_dependencies("llc"), {"libLLVM.so.23.1": path})
+
     def test_revision(self):
         self.assertEqual(build.tag("1"), "abla-xtensa-llvm-23.1.3-1")
         for value in ("", "0", "01", "1/../../x", "1;true", "1\n", "1234567"):

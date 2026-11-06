@@ -8,6 +8,10 @@ on:
         type: string
         required: true
         default: '1'
+      verify_run:
+        description: Verify retained archives from this workflow run; no build or publication
+        type: string
+        default: ''
       publish:
         description: Publish after all three builds and relocation checks pass
         type: boolean
@@ -32,8 +36,12 @@ jobs:
     if: github.repository == 'AndreBaltazar8/llvm-project'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
     outputs:
       tag: ${{ steps.plan.outputs.tag }}
+      builder: ${{ steps.plan.outputs.builder }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -44,22 +52,41 @@ jobs:
         env:
           REVISION: ${{ inputs.revision }}
           GH_TOKEN: ${{ github.token }}
+          VERIFY_RUN: ${{ inputs.verify_run }}
+          PUBLISH: ${{ inputs.publish }}
         run: |
           set -euo pipefail
           python3 abla-tools/xtensa-companion/unit_tests.py
           tag=$(python3 abla-tools/xtensa-companion/build.py tag "$REVISION")
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if [[ -n $VERIFY_RUN ]]; then
+            [[ $VERIFY_RUN =~ ^[1-9][0-9]*$ && $PUBLISH == false ]] || {
+              echo 'Verification requires a numeric run ID and publish=false' >&2; exit 1;
+            }
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$VERIFY_RUN" > source-run.json
+            python3 - <<'PYCODE' >> "$GITHUB_OUTPUT"
+          import json, os, re
+          run = json.load(open('source-run.json'))
+          assert run['event'] == 'workflow_dispatch'
+          assert run['path'].split('@', 1)[0] == '.github/workflows/abla-xtensa-companion.yml'
+          assert run['repository']['full_name'] == os.environ['GITHUB_REPOSITORY']
+          assert run['status'] == 'completed'
+          assert re.fullmatch('[0-9a-f]{40}', run['head_sha'])
+          print('builder=' + run['head_sha'])
+          PYCODE
+          fi
           # The listing must succeed; a network/auth error is not a missing tag.
           gh release list --repo "$GITHUB_REPOSITORY" --limit 1000 --json tagName > releases.json
           TAG="$tag" python3 - <<'PY'
           import json, os
           tags = [release['tagName'] for release in json.load(open('releases.json'))]
-          if os.environ['TAG'] in tags:
+          if not os.environ['VERIFY_RUN'] and os.environ['TAG'] in tags:
               raise SystemExit('Companion version already exists; choose a new revision')
           PY
 
   build:
     needs: plan
+    if: inputs.verify_run == ''
     strategy:
       fail-fast: false
       matrix:
@@ -160,9 +187,71 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  verify-retained:
+    needs: plan
+    if: inputs.verify_run != ''
+    permissions:
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: x86_64-linux
+          - runner: macos-15
+            platform: arm64-macos
+          - runner: macos-15-intel
+            platform: x86_64-macos
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+          sparse-checkout: abla-tools/xtensa-companion
+      - uses: actions/download-artifact@95815c38cf2ff2164869cbab79da8d1f422bc89e # v4
+        with:
+          name: companion-${{ matrix.platform }}
+          run-id: ${{ inputs.verify_run }}
+          github-token: ${{ github.token }}
+          path: dist
+      - name: Verify retained Linux archive in a clean old-glibc container
+        if: runner.os == 'Linux'
+        env:
+          EXPECTED_TAG: ${{ needs.plan.outputs.tag }}
+          EXPECTED_BUILDER: ${{ needs.plan.outputs.builder }}
+        run: |
+          docker run --rm -v "$PWD:/repo" -w /repo -e EXPECTED_TAG -e EXPECTED_BUILDER \
+            ubuntu:22.04@sha256:3b06811b2afd352be909dd088a004166d665dc76d38b13eada33522a9d915c6f \
+            bash -ceu '
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update
+              apt-get install -y --no-install-recommends python3
+              test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.35"
+              export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu
+              python3 abla-tools/xtensa-companion/build.py verify dist/*.tar.gz evidence \
+                --expected-version "$EXPECTED_TAG" --expected-builder "$EXPECTED_BUILDER"
+            '
+      - name: Verify retained Mac archive on a fresh native runner
+        if: runner.os == 'macOS'
+        env:
+          EXPECTED_TAG: ${{ needs.plan.outputs.tag }}
+          EXPECTED_BUILDER: ${{ needs.plan.outputs.builder }}
+        run: |
+          python3 abla-tools/xtensa-companion/build.py verify dist/*.tar.gz evidence \
+            --expected-version "$EXPECTED_TAG" --expected-builder "$EXPECTED_BUILDER"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: verified-${{ matrix.platform }}
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 14
+
   publish:
     needs: [plan, build, clean-linux]
-    if: inputs.publish
+    if: inputs.publish && inputs.verify_run == ''
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:

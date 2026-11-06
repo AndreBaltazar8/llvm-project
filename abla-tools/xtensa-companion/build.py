@@ -58,7 +58,7 @@ def linux_dependencies(path):
     text = capture("ldd", path)
     if "not found" in text:
         raise RuntimeError(text)
-    return dict(re.findall(r"^\s*(\S+) => (/\S+)", text, re.M))
+    return dict(re.findall(r"^\s*(\S+) => (/.+?)\s+\(0x[0-9a-fA-F]+\)\s*$", text, re.M))
 
 
 def mac_dependencies(path):
@@ -230,15 +230,25 @@ def extract(archive_path, destination):
     return roots[0]
 
 
-def verify(archive_path, output):
+def verify(archive_path, output, expected_version=None, expected_builder=None):
     expected = archive_path.with_suffix(archive_path.suffix + ".sha256").read_text().split()
     if expected != [digest(archive_path), archive_path.name]:
         raise ValueError("archive checksum mismatch")
     with tempfile.TemporaryDirectory(prefix="relocated Xtensa companion ") as temp:
         root = extract(archive_path, Path(temp))
         manifest = json.loads((root / "manifest.json").read_text())
-        if manifest["platform"] != host_platform():
+        host = host_platform()
+        if manifest["platform"] != host:
             raise ValueError("companion host mismatch")
+        for key in ("schema", "llvmVersion", "sourceCommit", "sourceArchiveSha256", "sourceRepository", "targets"):
+            if manifest.get(key) != CONFIG[key]:
+                raise ValueError(f"companion {key} does not match the selected source configuration")
+        if expected_version is not None and manifest["version"] != expected_version:
+            raise ValueError("companion revision does not match the verification request")
+        if expected_builder is not None and manifest.get("builderCommit") != expected_builder:
+            raise ValueError("companion builder differs from the source workflow run")
+        if root.name != manifest["version"] + "-" + host or archive_path.name != root.name + ".tar.gz":
+            raise ValueError("companion root/archive name mismatch")
         files = manifest["files"]
         actual = {str(p.relative_to(root)) for p in root.rglob("*") if p.is_file()}
         if actual != set(files) | {"manifest.json"}:
@@ -297,7 +307,6 @@ def build(revision, output):
     packaged = output / f"{root.name}.tar.gz"
     archive(root, packaged)
     packaged.with_suffix(".gz.sha256").write_text(f"{digest(packaged)}  {packaged.name}\n")
-    verify(packaged, output / "relocation-smoke")
     shutil.copy2(root / "manifest.json", output / f"{host}.manifest.json")
     shutil.copy2(build_dir / "CMakeCache.txt", output / f"{host}.cmake.txt")
     write_json(output / f"{host}.build.json", {
@@ -308,6 +317,7 @@ def build(revision, output):
         "unpackedBytes": sum(p.stat().st_size for p in root.rglob("*") if p.is_file()),
         "sourceCommit": CONFIG["sourceCommit"], "cmakeFlags": flags,
     })
+    verify(packaged, output / "relocation-smoke", version, os.environ.get("GITHUB_SHA"))
 
 
 def main():
@@ -321,13 +331,15 @@ def main():
     check = sub.add_parser("verify")
     check.add_argument("archive", type=Path)
     check.add_argument("output", type=Path)
+    check.add_argument("--expected-version")
+    check.add_argument("--expected-builder")
     args = parser.parse_args()
     if args.command == "tag":
         print(tag(args.revision))
     elif args.command == "build":
         build(args.revision, args.output.resolve())
     else:
-        verify(args.archive.resolve(), args.output.resolve())
+        verify(args.archive.resolve(), args.output.resolve(), args.expected_version, args.expected_builder)
 
 
 if __name__ == "__main__":
