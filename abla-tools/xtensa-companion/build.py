@@ -163,6 +163,10 @@ def smoke(root, output):
     header = (output / "patches.o").read_bytes()[:20]
     if header[:6] != b"\x7fELF\x01\x01" or struct.unpack_from("<H", header, 18)[0] != 94:
         raise RuntimeError("expected a little-endian ELF32 Xtensa object")
+    # A 128 to 255 byte frame that takes a stack address aborted llc without the scavenger's emergency slot
+    # (the fork's e4da75d4): this fixture, reduced from such a function, must compile.
+    run(llc, *options, "-xtensa-direct-calls", "-xtensa-narrow-branches",
+        HERE / "scavenging-slot.ll", "-o", output / "scavenging-slot.s")
     optimized = output / "optimized.ll"
     result = run(opt, "-passes=default<O2>,globaldce", "-S", fixture, "-o", optimized,
                  capture_output=True, text=True)
